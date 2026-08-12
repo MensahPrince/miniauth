@@ -21,13 +21,14 @@ func Login(c fiber.Ctx) error {
 	}
 
 	err := database.QueryRow(
-		"SELECT id, name, email, password FROM users WHERE email = ?",
+		"SELECT id, name, email, password, role FROM users WHERE email = ?",
 		req.Email,
 	).Scan(
 		&user.Id,
 		&user.Name,
 		&user.Email,
 		&user.Password,
+		&user.Role,
 	)
 
 	if err != nil {
@@ -42,7 +43,7 @@ func Login(c fiber.Ctx) error {
 		})
 	}
 
-	token, err := auth.GenerateSymmetricJWT(user.Id, user.Email)
+	token, err := auth.GenerateSymmetricJWT(user.Id, user.Email, user.Role)
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{
 			"message": err.Error(),

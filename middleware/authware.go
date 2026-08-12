@@ -33,6 +33,17 @@ func JWTMiddleware(c fiber.Ctx) error {
 	claims := token.Claims.(jwt.MapClaims)
 	c.Locals("user_id", claims["user_id"])
 	c.Locals("email", claims["email"])
+	if role, ok := claims["role"]; ok {
+		c.Locals("role", role)
+	}
 
+	return c.Next()
+}
+
+func AdminMiddleware(c fiber.Ctx) error {
+	role := c.Locals("role")
+	if role == nil || role.(string) != "admin" {
+		return fiber.NewError(fiber.StatusForbidden, "requires admin privileges")
+	}
 	return c.Next()
 }

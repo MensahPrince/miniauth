@@ -25,12 +25,12 @@ func Register(c fiber.Ctx) error {
 		c.SendString("Failed to Hash Password")
 	}
 
-	//Write to Database
 	_, err = database.Exec(
-		"INSERT INTO users (name, email, password) VALUES (?,?,?)",
+		"INSERT INTO users (name, email, password, role) VALUES (?,?,?,?)",
 		req.Name,
 		req.Email,
 		hashedPassphrase,
+		"user",
 	)
 
 	if err != nil {
@@ -39,10 +39,17 @@ func Register(c fiber.Ctx) error {
 		})
 	}
 
+	_, _ = database.Exec(
+		"INSERT INTO logs (user_email, action) VALUES (?, ?)",
+		req.Email,
+		"Registered new account: " + req.Email,
+	)
+
 	return c.JSON(fiber.Map{
 		"message":  "Success",
 		"name":     req.Name,
 		"email":    req.Email,
+		"role":     "user",
 		"password": req.Password,
 	})
 }

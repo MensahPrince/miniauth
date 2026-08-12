@@ -6,7 +6,7 @@ import (
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"   // driver: "mysql"
-	_ "github.com/mattn/go-sqlite3"      // driver: "sqlite3"
+	_ "modernc.org/sqlite"              // driver: "sqlite" (pure-Go, no CGO)
 	// add more blank imports here as needed, e.g.:
 	// _ "github.com/lib/pq"             // driver: "postgres"
 )
@@ -14,7 +14,7 @@ import (
 var DB *sql.DB
 
 // Connect opens a database connection for the given driver and source.
-// driver must match a registered database/sql driver name, e.g. "sqlite3", "mysql", "postgres".
+// driver must match a registered database/sql driver name, e.g. "sqlite" (modernc), "mysql", "postgres".
 func Connect(driver, source string) error {
 	var err error
 	DB, err = sql.Open(driver, source)
@@ -36,7 +36,7 @@ func Connect(driver, source string) error {
 // needs a much smaller pool than a real client-server DB like MySQL/Postgres.
 func configurePool(driver string) {
 	switch driver {
-	case "sqlite3":
+	case "sqlite": // modernc.org/sqlite — pure-Go, no CGO required
 		DB.SetMaxOpenConns(1)
 		DB.SetConnMaxLifetime(time.Minute * 3)
 	default: // mysql, postgres, etc. — normal networked DB pool sizing
