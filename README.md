@@ -97,6 +97,165 @@ If you don't supply `SchemaPath`/`SchemaSQL`, `Init` creates three tables (`user
 
 Change this password (via `POST /admin/users/:id/reset` or directly in the database) immediately in any environment that isn't purely local/dev, since the credentials are hard-coded in `init.go`.
 
+## Tutorials
+
+Two full walkthroughs, from an empty directory to a running server with a working database connection.
+
+### Tutorial: SQLite quickstart (no external services)
+
+This is the fastest way to try Mini Auth locally — SQLite needs no server, just a file on disk.
+
+1. Create a new project and pull in the dependencies:
+
+   ```bash
+   mkdir myapp && cd myapp
+   go mod init myapp
+   go get github.com/MensahPrince/miniauth
+   go get github.com/gofiber/fiber/v3
+   ```
+
+2. Set a JWT signing key (any random string works for local dev):
+
+   ```bash
+   export JWT_KEY="dev-secret-change-me"
+   ```
+
+3. Create `main.go`:
+
+   ```go
+   package main
+
+   import (
+       "log"
+       "os"
+
+       "github.com/MensahPrince/miniauth"
+       "github.com/gofiber/fiber/v3"
+   )
+
+   func main() {
+       app := fiber.New()
+
+       cfg := miniauth.Config{
+           DBDriver: "sqlite",
+           DBSource: "file:auth.db?cache=shared&mode=rwc",
+           JWTKey:   os.Getenv("JWT_KEY"),
+       }
+
+       if err := miniauth.Init(cfg, app); err != nil {
+           log.Fatalf("failed to initialize miniauth: %v", err)
+       }
+
+       log.Fatal(app.Listen(":3000"))
+   }
+   ```
+
+4. Run it:
+
+   ```bash
+   go run main.go
+   ```
+
+   On first run this creates `auth.db` in the current directory, applies the default schema (`users`, `patients`, `logs`), and seeds the default admin account (`admin@watchdog.local` / `admin123`).
+
+5. Verify the connection came up:
+
+   ```bash
+   curl http://localhost:3000/
+   ```
+
+   The response includes the output of `utils.CheckDB()` — `"Connected"` means `db.DB` opened and pinged successfully.
+
+6. Log in as the seeded admin to confirm the DB round-trips real queries:
+
+   ```bash
+   curl -X POST http://localhost:3000/login \
+     -H "Content-Type: application/json" \
+     -d '{"email":"admin@watchdog.local","password":"admin123"}'
+   ```
+
+   A JWT in the response means `Init` connected, created tables, and inserted/read rows successfully.
+
+### Tutorial: MySQL setup
+
+Use this when you want a real client-server database instead of a local file.
+
+1. Start a MySQL instance (skip this step if you already have one). This example uses Docker:
+
+   ```bash
+   docker run --name miniauth-mysql \
+     -e MYSQL_ROOT_PASSWORD=rootpass \
+     -e MYSQL_DATABASE=miniauth \
+     -e MYSQL_USER=miniauth \
+     -e MYSQL_PASSWORD=miniauthpass \
+     -p 3306:3306 \
+     -d mysql:8
+   ```
+
+   Give it a few seconds to finish initializing before continuing.
+
+2. In your project directory, copy `.env.local.example` (from this repo) to `.env.local`, or just export the variables directly, matching what you started MySQL with:
+
+   ```bash
+   export DB_USER=miniauth
+   export DB_PASS=miniauthpass
+   export DB_HOST=127.0.0.1
+   export DB_NAME=miniauth
+   export JWT_KEY="dev-secret-change-me"
+   ```
+
+3. Build the DSN from those variables and pass `DBDriver: "mysql"` in `Config`:
+
+   ```go
+   package main
+
+   import (
+       "fmt"
+       "log"
+       "os"
+
+       "github.com/MensahPrince/miniauth"
+       "github.com/gofiber/fiber/v3"
+   )
+
+   func main() {
+       app := fiber.New()
+
+       dsn := fmt.Sprintf("%s:%s@tcp(%s:3306)/%s?parseTime=true",
+           os.Getenv("DB_USER"), os.Getenv("DB_PASS"), os.Getenv("DB_HOST"), os.Getenv("DB_NAME"))
+
+       cfg := miniauth.Config{
+           DBDriver: "mysql",
+           DBSource: dsn,
+           JWTKey:   os.Getenv("JWT_KEY"),
+       }
+
+       if err := miniauth.Init(cfg, app); err != nil {
+           log.Fatalf("failed to initialize miniauth: %v", err)
+       }
+
+       log.Fatal(app.Listen(":3000"))
+   }
+   ```
+
+4. Run it and verify, same as the SQLite tutorial:
+
+   ```bash
+   go run main.go
+   curl http://localhost:3000/
+   curl -X POST http://localhost:3000/login \
+     -H "Content-Type: application/json" \
+     -d '{"email":"admin@watchdog.local","password":"admin123"}'
+   ```
+
+### Troubleshooting
+
+- **`db: failed to open sqlite connection` / `unknown driver`** — the driver name in `Config.DBDriver` must exactly match `"sqlite"` or `"mysql"` (not `"sqlite3"` — see the driver table above). A typo here fails before any DSN is even attempted.
+- **`db: failed to ping mysql database`** — usually means MySQL isn't reachable yet at `DB_HOST:3306`, or the credentials/database name in the DSN don't match what the server was started with. If you used the Docker command above, confirm the container is up with `docker ps` and that you gave it a few seconds to finish initializing.
+- **SQLite "database is locked"** — expected under concurrent writers; `db/db.go` already caps SQLite to `SetMaxOpenConns(1)` to avoid this, but if you're running multiple processes against the same `auth.db` file, switch to MySQL.
+- **`GET /` reports `"Database Connection Failed"`** — `miniauth.Init` returned an error before this point would normally be reached, so this really means `db.DB` was never set; check the error returned by `Init` in your own logs rather than relying on this endpoint alone.
+- **Login with the default admin fails** — the seed step only runs once, when the `users` table is empty. If you've already got rows in `users` (e.g. reusing an old `auth.db` or MySQL database), the seed is skipped and `admin@watchdog.local` may not exist in that database.
+
 ## API endpoints
 
 ### GET /
