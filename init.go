@@ -4,6 +4,7 @@ package miniauth
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/MensahPrince/miniauth/db"
 	"github.com/MensahPrince/miniauth/utils"
@@ -103,7 +104,7 @@ func Init(c Config, app *fiber.App) error {
 	}
 
 	if schemaToRun != "" {
-		if _, err := db.DB.Exec(schemaToRun); err != nil {
+		if err := execStatements(schemaToRun); err != nil {
 			return fmt.Errorf("mini_auth: schema init failed: %w", err)
 		}
 	}
@@ -137,6 +138,14 @@ func Init(c Config, app *fiber.App) error {
 		}
 	}
 
+	// Run any caller-supplied SQL after the core schema/migration/seed steps
+	// (e.g. app-specific tables, extra indexes, seed data).
+	if cfg.PostInitSQL != "" {
+		if err := execStatements(cfg.PostInitSQL); err != nil {
+			return fmt.Errorf("mini_auth: post-init SQL failed: %w", err)
+		}
+	}
+
 	// Enable CORS for frontend requests
 	app.Use(cors.New(cors.Config{
 		AllowOrigins: []string{"*"},
@@ -150,4 +159,21 @@ func Init(c Config, app *fiber.App) error {
 
 func JWTKey() string {
 	return cfg.JWTKey
+}
+
+// execStatements splits a ";"-separated SQL script into individual statements
+// and executes them one at a time, since the sql.DB drivers used here don't
+// support multiple statements per Exec call unless the caller opts into
+// driver-specific multi-statement DSN flags.
+func execStatements(script string) error {
+	for _, stmt := range strings.Split(script, ";") {
+		stmt = strings.TrimSpace(stmt)
+		if stmt == "" {
+			continue
+		}
+		if _, err := db.DB.Exec(stmt); err != nil {
+			return err
+		}
+	}
+	return nil
 }
