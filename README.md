@@ -1,6 +1,8 @@
 # Mini Auth
 
-Mini Auth is a small authentication service built with Go, Fiber v3, JWT, and bcrypt. It ships as an importable library: you call `miniauth.Init(cfg, app)` from your own Fiber application, and it connects to a database, applies a schema, seeds a default admin account, and mounts a set of auth/profile/admin routes onto your app.
+Mini Auth is a small authentication service built with Go, Fiber v3, JWT, and bcrypt. It ships as an importable library: you call `miniauth.Init(cfg, app)` from your own Fiber application, and it connects to a database, migrates in the schema SQL *you* provide, seeds a default admin account, and mounts a set of auth/profile/admin routes onto your app.
+
+Mini Auth does not ship any schema of its own — it only migrates whatever SQL you attach via `Config.SchemaPath`/`SchemaSQL` (and, optionally, `PostInitSQL`). This keeps the library from baking in opinions about your tables; you own the schema, `Init` just applies it. See **Required schema** below for the tables/columns the built-in routes expect.
 
 ## What this project covers
 
@@ -16,7 +18,7 @@ Mini Auth is a small authentication service built with Go, Fiber v3, JWT, and bc
 ## Project structure
 
 - `config.go` — the `Config` struct callers fill in and pass to `Init`
-- `init.go` — `miniauth.Init`: connects to the DB, runs the schema/migrations, seeds a default admin, wires up CORS, and registers routes
+- `init.go` — `miniauth.Init`: connects to the DB, migrates in the caller-supplied schema, seeds a default admin, wires up CORS, and registers routes
 - `routes.go` — API route registration (`registerRoutes`)
 - `db/db.go` — driver-agnostic `database/sql` connection setup (MySQL and SQLite drivers are blank-imported here)
 - `handlers/` — request handlers for auth, profile, OTP, admin, and the example patients resource
@@ -30,7 +32,7 @@ This module has no `main.go` of its own — it's a library. The `main.go` shown 
 
 ## Connecting it to a database
 
-Mini Auth does not read any `DB_*` environment variables itself. **You** open the database connection details (driver name + DSN) and pass them in through `miniauth.Config`; `Init` does the rest (connect, ping, configure the pool, create tables if needed, seed a default admin).
+Mini Auth does not read any `DB_*` environment variables itself. **You** open the database connection details (driver name + DSN) and pass them in through `miniauth.Config`; `Init` does the rest (connect, ping, configure the pool, migrate in the schema SQL you attach, seed a default admin).
 
 ### 1. Pick a driver
 
@@ -59,9 +61,10 @@ To support another database (e.g. Postgres), blank-import its driver in `db/db.g
 
 ```go
 cfg := miniauth.Config{
-    DBDriver: "sqlite", // or "mysql"
-    DBSource: "file:auth.db?cache=shared&mode=rwc",
-    JWTKey:   os.Getenv("JWT_KEY"),
+    DBDriver:   "sqlite", // or "mysql"
+    DBSource:   "file:auth.db?cache=shared&mode=rwc",
+    JWTKey:     os.Getenv("JWT_KEY"),
+    SchemaPath: "./schema.sql", // your schema — see "Required schema" below
 }
 
 if err := miniauth.Init(cfg, app); err != nil {
@@ -73,20 +76,54 @@ if err := miniauth.Init(cfg, app); err != nil {
 
 1. Open the connection with `db.Connect` and `Ping` it.
 2. Set pool limits appropriate to the driver — SQLite is capped at a single open connection (`SetMaxOpenConns(1)`) because it only supports one writer at a time; MySQL gets a normal pool (10 open/idle conns).
-3. Run a schema. By default it uses a built-in schema matching the chosen driver (see below); you can override this with `SchemaPath` (path to a `.sql` file) or `SchemaSQL` (a raw SQL string) on `Config`. Schema/custom SQL is split on `;` and executed statement-by-statement, so multi-statement scripts work regardless of driver-specific multi-statement DSN flags.
+3. Migrate in your schema. `Init` ships no schema of its own — set `SchemaPath` (path to a `.sql` file) or `SchemaSQL` (a raw SQL string) on `Config` to supply it (see **Required schema** below for what the built-in routes expect). The SQL is split on `;` and executed statement-by-statement, so multi-statement scripts work regardless of driver-specific multi-statement DSN flags.
 4. Run a best-effort `ALTER TABLE users ADD COLUMN role ...` so pre-existing databases from older versions of this schema pick up the `role` column (the error is ignored if the column already exists).
 5. Seed a default admin user (see **Default admin account** below) if the `users` table is empty.
-6. Run `Config.PostInitSQL`, if set — a raw SQL string executed after the schema/migration/seed steps above, for app-specific tables, indexes, or seed data (see **Attaching custom SQL** below).
+6. Run `Config.PostInitSQL`, if set — a raw SQL string executed after the schema/migration/seed steps above, for app-specific tables, indexes, or seed data (see **Attaching additional custom SQL** below).
 7. Enable permissive CORS (`AllowOrigins: ["*"]`).
 8. Register all routes from `routes.go` onto your Fiber app.
 
-### Default schema
+### Required schema
 
-If you don't supply `SchemaPath`/`SchemaSQL`, `Init` creates three tables (`users`, `patients`, `logs`) using either `sqliteSchema` or `mysqlSchema` from `init.go`, matched to `Config.DBDriver`:
+`Init` does not create any tables on its own — if you skip `SchemaPath`/`SchemaSQL` entirely, `schemaToRun` stays empty and no migration runs at all. The built-in handlers assume the following tables/columns exist by the time `Init` finishes, so your `SchemaPath`/`SchemaSQL` needs to create them:
 
-- `users` — `id`, `name`, `email` (unique), `password` (bcrypt hash), `role` (defaults to `"user"`), `created_at`
-- `patients` — a small example resource (`first_name`, `surname`, `phone`, `email`, `appointment_date`, `notes`, `created_by`, `created_at`) exercised by `POST/GET /patients`
-- `logs` — a simple audit trail (`user_email`, `action`, `created_at`) written to by registration, admin actions, and patient creation
+- `users` — `id`, `name`, `email` (unique), `password` (bcrypt hash), `role` (defaults to `"user"`), `created_at`. Required by registration, login, profile, admin user management, and the default-admin seed step.
+- `logs` — `id`, `user_email`, `action`, `created_at`. Required by registration, admin actions, patient creation, and the seed step's audit entry.
+- `patients` — `id`, `first_name`, `surname`, `phone`, `email`, `appointment_date`, `notes`, `created_by`, `created_at`. Only required if you mount/use the example `POST/GET /patients` routes.
+
+Example `schema.sql` (SQLite) that satisfies all of the above — see the tutorials below for the MySQL equivalent:
+
+```sql
+CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY,
+    name TEXT NOT NULL,
+    email TEXT NOT NULL UNIQUE,
+    password TEXT NOT NULL,
+    role TEXT DEFAULT 'user',
+    created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+
+CREATE TABLE IF NOT EXISTS logs (
+    id INTEGER PRIMARY KEY,
+    user_email TEXT NOT NULL,
+    action TEXT NOT NULL,
+    created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+
+CREATE TABLE IF NOT EXISTS patients (
+    id INTEGER PRIMARY KEY,
+    first_name TEXT NOT NULL,
+    surname TEXT NOT NULL,
+    phone TEXT NOT NULL,
+    email TEXT,
+    appointment_date TEXT NOT NULL,
+    notes TEXT,
+    created_by TEXT,
+    created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+```
+
+If the `users` table doesn't exist by the time `Init` reaches the seed step, that step's `SELECT COUNT(*) FROM users` simply errors and is skipped — `Init` still returns successfully, but no admin account is seeded and the auth routes will fail against a missing table until you supply a schema that creates it.
 
 ### Default admin account
 
@@ -98,9 +135,9 @@ If you don't supply `SchemaPath`/`SchemaSQL`, `Init` creates three tables (`user
 
 Change this password (via `POST /admin/users/:id/reset` or directly in the database) immediately in any environment that isn't purely local/dev, since the credentials are hard-coded in `init.go`.
 
-### Attaching custom SQL
+### Attaching additional custom SQL
 
-If your app needs its own tables, indexes, or seed rows beyond what `SchemaPath`/`SchemaSQL` cover, set `Config.PostInitSQL` to a raw SQL string. `Init` runs it after the schema, `role`-column migration, and default-admin seed have all completed:
+`SchemaPath`/`SchemaSQL` is where your core schema (including the required tables above) belongs. If you also want extra tables, indexes, or seed rows applied *after* that core schema, the `role`-column migration, and the default-admin seed have all run, set `Config.PostInitSQL` to a second raw SQL string:
 
 ```go
 cfg := miniauth.Config{
@@ -119,7 +156,7 @@ cfg := miniauth.Config{
 }
 ```
 
-Like the built-in schema, `PostInitSQL` is split on `;` and executed one statement at a time, so multiple `CREATE TABLE`/`INSERT`/etc. statements in one string work without needing a driver-specific multi-statement DSN flag.
+Like `SchemaSQL`/`SchemaPath`, `PostInitSQL` is split on `;` and executed one statement at a time, so multiple `CREATE TABLE`/`INSERT`/etc. statements in one string work without needing a driver-specific multi-statement DSN flag.
 
 ## Tutorials
 
@@ -144,7 +181,27 @@ This is the fastest way to try Mini Auth locally — SQLite needs no server, jus
    export JWT_KEY="dev-secret-change-me"
    ```
 
-3. Create `main.go`:
+3. Create `schema.sql` (see **Required schema** above for why each column is there):
+
+   ```sql
+   CREATE TABLE IF NOT EXISTS users (
+       id INTEGER PRIMARY KEY,
+       name TEXT NOT NULL,
+       email TEXT NOT NULL UNIQUE,
+       password TEXT NOT NULL,
+       role TEXT DEFAULT 'user',
+       created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+   );
+
+   CREATE TABLE IF NOT EXISTS logs (
+       id INTEGER PRIMARY KEY,
+       user_email TEXT NOT NULL,
+       action TEXT NOT NULL,
+       created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+   );
+   ```
+
+4. Create `main.go`, pointing `SchemaPath` at that file:
 
    ```go
    package main
@@ -161,9 +218,10 @@ This is the fastest way to try Mini Auth locally — SQLite needs no server, jus
        app := fiber.New()
 
        cfg := miniauth.Config{
-           DBDriver: "sqlite",
-           DBSource: "file:auth.db?cache=shared&mode=rwc",
-           JWTKey:   os.Getenv("JWT_KEY"),
+           DBDriver:   "sqlite",
+           DBSource:   "file:auth.db?cache=shared&mode=rwc",
+           JWTKey:     os.Getenv("JWT_KEY"),
+           SchemaPath: "./schema.sql",
        }
 
        if err := miniauth.Init(cfg, app); err != nil {
@@ -174,15 +232,15 @@ This is the fastest way to try Mini Auth locally — SQLite needs no server, jus
    }
    ```
 
-4. Run it:
+5. Run it:
 
    ```bash
    go run main.go
    ```
 
-   On first run this creates `auth.db` in the current directory, applies the default schema (`users`, `patients`, `logs`), and seeds the default admin account (`admin@watchdog.local` / `admin123`).
+   On first run this creates `auth.db` in the current directory, migrates in `schema.sql` (`users`, `logs`), and seeds the default admin account (`admin@watchdog.local` / `admin123`).
 
-5. Verify the connection came up:
+6. Verify the connection came up:
 
    ```bash
    curl http://localhost:3000/
@@ -190,7 +248,7 @@ This is the fastest way to try Mini Auth locally — SQLite needs no server, jus
 
    The response includes the output of `utils.CheckDB()` — `"Connected"` means `db.DB` opened and pinged successfully.
 
-6. Log in as the seeded admin to confirm the DB round-trips real queries:
+7. Log in as the seeded admin to confirm the DB round-trips real queries:
 
    ```bash
    curl -X POST http://localhost:3000/login \
@@ -228,7 +286,27 @@ Use this when you want a real client-server database instead of a local file.
    export JWT_KEY="dev-secret-change-me"
    ```
 
-3. Build the DSN from those variables and pass `DBDriver: "mysql"` in `Config`:
+3. Create `schema.sql` (MySQL equivalent of the SQLite one above):
+
+   ```sql
+   CREATE TABLE IF NOT EXISTS users (
+       id INT AUTO_INCREMENT PRIMARY KEY,
+       name VARCHAR(255) NOT NULL,
+       email VARCHAR(255) NOT NULL UNIQUE,
+       password VARCHAR(255) NOT NULL,
+       role VARCHAR(20) DEFAULT 'user',
+       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+   );
+
+   CREATE TABLE IF NOT EXISTS logs (
+       id INT AUTO_INCREMENT PRIMARY KEY,
+       user_email VARCHAR(100) NOT NULL,
+       action VARCHAR(255) NOT NULL,
+       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+   );
+   ```
+
+4. Build the DSN from those variables and pass `DBDriver: "mysql"` plus `SchemaPath` in `Config`:
 
    ```go
    package main
@@ -249,9 +327,10 @@ Use this when you want a real client-server database instead of a local file.
            os.Getenv("DB_USER"), os.Getenv("DB_PASS"), os.Getenv("DB_HOST"), os.Getenv("DB_NAME"))
 
        cfg := miniauth.Config{
-           DBDriver: "mysql",
-           DBSource: dsn,
-           JWTKey:   os.Getenv("JWT_KEY"),
+           DBDriver:   "mysql",
+           DBSource:   dsn,
+           JWTKey:     os.Getenv("JWT_KEY"),
+           SchemaPath: "./schema.sql",
        }
 
        if err := miniauth.Init(cfg, app); err != nil {
@@ -262,7 +341,7 @@ Use this when you want a real client-server database instead of a local file.
    }
    ```
 
-4. Run it and verify, same as the SQLite tutorial:
+5. Run it and verify, same as the SQLite tutorial:
 
    ```bash
    go run main.go
@@ -279,6 +358,7 @@ Use this when you want a real client-server database instead of a local file.
 - **SQLite "database is locked"** — expected under concurrent writers; `db/db.go` already caps SQLite to `SetMaxOpenConns(1)` to avoid this, but if you're running multiple processes against the same `auth.db` file, switch to MySQL.
 - **`GET /` reports `"Database Connection Failed"`** — `miniauth.Init` returned an error before this point would normally be reached, so this really means `db.DB` was never set; check the error returned by `Init` in your own logs rather than relying on this endpoint alone.
 - **Login with the default admin fails** — the seed step only runs once, when the `users` table is empty. If you've already got rows in `users` (e.g. reusing an old `auth.db` or MySQL database), the seed is skipped and `admin@watchdog.local` may not exist in that database.
+- **`no such table: users` / `Table 'x.users' doesn't exist`** — `Init` doesn't create this table on its own; you must supply a `SchemaPath` or `SchemaSQL` that creates it (see **Required schema** above).
 
 ## API endpoints
 
@@ -346,7 +426,7 @@ Requires authentication. Expects the current password for confirmation, then del
 
 ### POST /patients, GET /patients
 
-Require authentication (any logged-in user, not just admins). Create or list example patient records; each row records `created_by` (the creator's email) and is logged to the `logs` table.
+Require authentication (any logged-in user, not just admins). Create or list example patient records; each row records `created_by` (the creator's email) and is logged to the `logs` table. Requires a `patients` table (see **Required schema** above) — these routes are always mounted, so include `patients` in your schema if you use them.
 
 ### Admin routes (require a valid JWT **and** `role: admin`)
 
@@ -400,15 +480,15 @@ func main() {
 
 	// 2. Configure the authentication module
 	cfg := miniauth.Config{
-		DBDriver: "sqlite", // or "mysql" — see "Connecting it to a database" above
-		DBSource: "file:auth.db?cache=shared&mode=rwc", // DSN for your DB
-		JWTKey:   os.Getenv("JWT_KEY"),
-		// SchemaPath:  "./schema.sql", // Optional: Provide a custom schema file
-		// SchemaSQL:   "CREATE TABLE ...", // Optional: Provide a raw SQL string
-		// PostInitSQL: "CREATE TABLE ...", // Optional: Extra SQL run after schema/migration/seed
+		DBDriver:   "sqlite", // or "mysql" — see "Connecting it to a database" above
+		DBSource:   "file:auth.db?cache=shared&mode=rwc", // DSN for your DB
+		JWTKey:     os.Getenv("JWT_KEY"),
+		SchemaPath: "./schema.sql", // Required: mini_auth ships no schema of its own — see "Required schema" above
+		// SchemaSQL:   "CREATE TABLE ...", // Alternative to SchemaPath: a raw SQL string instead of a file
+		// PostInitSQL: "CREATE TABLE ...", // Optional: extra SQL run after the schema/migration/seed steps
 	}
 
-	// 3. Initialize miniauth (this connects to the DB, runs migrations, and mounts auth routes)
+	// 3. Initialize miniauth (this connects to the DB, migrates in your schema, and mounts auth routes)
 	if err := miniauth.Init(cfg, app); err != nil {
 		log.Fatalf("failed to initialize miniauth: %v", err)
 	}
@@ -444,7 +524,7 @@ cfg := miniauth.Config{
 
 - This project is a lightweight authentication starter and is not a full production-ready identity platform.
 - OTP values are currently returned directly in the response for development convenience.
-- The application expects `users`, `patients`, and `logs` tables in the configured database. Default schemas are applied automatically on init unless overridden via `SchemaPath` or `SchemaSQL`; app-specific tables can be layered on top via `PostInitSQL` (see **Attaching custom SQL** above).
+- `Init` migrates in whatever SQL you attach and nothing more — it ships no default schema. You must supply `users`, `logs`, and (if you use those routes) `patients` via `SchemaPath`/`SchemaSQL` (see **Required schema** above); extra app-specific tables can be layered on top via `PostInitSQL` (see **Attaching additional custom SQL** above).
 - A default admin account (`admin@watchdog.local` / `admin123`) is seeded automatically the first time `Init` runs against an empty `users` table — see **Default admin account** above.
 - CORS is currently enabled for all origins (`AllowOrigins: ["*"]`); tighten this before deploying anywhere reachable from the public internet.
 

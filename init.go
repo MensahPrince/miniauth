@@ -14,66 +14,6 @@ import (
 
 var cfg Config
 
-const sqliteSchema = `
-CREATE TABLE IF NOT EXISTS users (
-    id INTEGER PRIMARY KEY,
-    name TEXT NOT NULL,
-    email TEXT NOT NULL UNIQUE,
-    password TEXT NOT NULL,
-    role TEXT DEFAULT 'user',
-    created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
-);
-
-CREATE TABLE IF NOT EXISTS patients (
-    id INTEGER PRIMARY KEY,
-    first_name TEXT NOT NULL,
-    surname TEXT NOT NULL,
-    phone TEXT NOT NULL,
-    email TEXT,
-    appointment_date TEXT NOT NULL,
-    notes TEXT,
-    created_by TEXT,
-    created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
-);
-
-CREATE TABLE IF NOT EXISTS logs (
-    id INTEGER PRIMARY KEY,
-    user_email TEXT NOT NULL,
-    action TEXT NOT NULL,
-    created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
-);
-`
-
-const mysqlSchema = `
-CREATE TABLE IF NOT EXISTS users (
-    id INT AUTO_INCREMENT PRIMARY KEY,
-    name VARCHAR(255) NOT NULL,
-    email VARCHAR(255) NOT NULL UNIQUE,
-    password VARCHAR(255) NOT NULL,
-    role VARCHAR(20) DEFAULT 'user',
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE TABLE IF NOT EXISTS patients (
-    id INT AUTO_INCREMENT PRIMARY KEY,
-    first_name VARCHAR(100) NOT NULL,
-    surname VARCHAR(100) NOT NULL,
-    phone VARCHAR(50) NOT NULL,
-    email VARCHAR(100),
-    appointment_date VARCHAR(50) NOT NULL,
-    notes TEXT,
-    created_by VARCHAR(100),
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE TABLE IF NOT EXISTS logs (
-    id INT AUTO_INCREMENT PRIMARY KEY,
-    user_email VARCHAR(100) NOT NULL,
-    action VARCHAR(255) NOT NULL,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-`
-
 func Init(c Config, app *fiber.App) error {
 	cfg = c
 
@@ -85,6 +25,8 @@ func Init(c Config, app *fiber.App) error {
 		return fmt.Errorf("mini_auth: db connect failed: %w", err)
 	}
 
+	// mini_auth ships no schema of its own — the caller supplies the SQL to
+	// run (via SchemaPath or SchemaSQL) and Init just migrates it in.
 	var schemaToRun string
 	if cfg.SchemaPath != "" {
 		b, err := os.ReadFile(cfg.SchemaPath)
@@ -94,13 +36,6 @@ func Init(c Config, app *fiber.App) error {
 		schemaToRun = string(b)
 	} else if cfg.SchemaSQL != "" {
 		schemaToRun = cfg.SchemaSQL
-	} else {
-		switch cfg.DBDriver {
-		case "sqlite":
-			schemaToRun = sqliteSchema
-		case "mysql":
-			schemaToRun = mysqlSchema
-		}
 	}
 
 	if schemaToRun != "" {
