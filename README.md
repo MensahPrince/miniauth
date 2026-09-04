@@ -73,11 +73,12 @@ if err := miniauth.Init(cfg, app); err != nil {
 
 1. Open the connection with `db.Connect` and `Ping` it.
 2. Set pool limits appropriate to the driver — SQLite is capped at a single open connection (`SetMaxOpenConns(1)`) because it only supports one writer at a time; MySQL gets a normal pool (10 open/idle conns).
-3. Run a schema. By default it uses a built-in schema matching the chosen driver (see below); you can override this with `SchemaPath` (path to a `.sql` file) or `SchemaSQL` (a raw SQL string) on `Config`.
+3. Run a schema. By default it uses a built-in schema matching the chosen driver (see below); you can override this with `SchemaPath` (path to a `.sql` file) or `SchemaSQL` (a raw SQL string) on `Config`. Schema/custom SQL is split on `;` and executed statement-by-statement, so multi-statement scripts work regardless of driver-specific multi-statement DSN flags.
 4. Run a best-effort `ALTER TABLE users ADD COLUMN role ...` so pre-existing databases from older versions of this schema pick up the `role` column (the error is ignored if the column already exists).
 5. Seed a default admin user (see **Default admin account** below) if the `users` table is empty.
-6. Enable permissive CORS (`AllowOrigins: ["*"]`).
-7. Register all routes from `routes.go` onto your Fiber app.
+6. Run `Config.PostInitSQL`, if set — a raw SQL string executed after the schema/migration/seed steps above, for app-specific tables, indexes, or seed data (see **Attaching custom SQL** below).
+7. Enable permissive CORS (`AllowOrigins: ["*"]`).
+8. Register all routes from `routes.go` onto your Fiber app.
 
 ### Default schema
 
@@ -96,6 +97,29 @@ If you don't supply `SchemaPath`/`SchemaSQL`, `Init` creates three tables (`user
 - role: `admin`
 
 Change this password (via `POST /admin/users/:id/reset` or directly in the database) immediately in any environment that isn't purely local/dev, since the credentials are hard-coded in `init.go`.
+
+### Attaching custom SQL
+
+If your app needs its own tables, indexes, or seed rows beyond what `SchemaPath`/`SchemaSQL` cover, set `Config.PostInitSQL` to a raw SQL string. `Init` runs it after the schema, `role`-column migration, and default-admin seed have all completed:
+
+```go
+cfg := miniauth.Config{
+    DBDriver: "sqlite",
+    DBSource: "file:auth.db?cache=shared&mode=rwc",
+    JWTKey:   os.Getenv("JWT_KEY"),
+    PostInitSQL: `
+        CREATE TABLE IF NOT EXISTS links (
+            id INTEGER PRIMARY KEY,
+            short_code TEXT NOT NULL UNIQUE,
+            target_url TEXT NOT NULL,
+            created_by TEXT,
+            created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        );
+    `,
+}
+```
+
+Like the built-in schema, `PostInitSQL` is split on `;` and executed one statement at a time, so multiple `CREATE TABLE`/`INSERT`/etc. statements in one string work without needing a driver-specific multi-statement DSN flag.
 
 ## Tutorials
 
@@ -379,8 +403,9 @@ func main() {
 		DBDriver: "sqlite", // or "mysql" — see "Connecting it to a database" above
 		DBSource: "file:auth.db?cache=shared&mode=rwc", // DSN for your DB
 		JWTKey:   os.Getenv("JWT_KEY"),
-		// SchemaPath: "./schema.sql", // Optional: Provide a custom schema file
-		// SchemaSQL:  "CREATE TABLE ...", // Optional: Provide a raw SQL string
+		// SchemaPath:  "./schema.sql", // Optional: Provide a custom schema file
+		// SchemaSQL:   "CREATE TABLE ...", // Optional: Provide a raw SQL string
+		// PostInitSQL: "CREATE TABLE ...", // Optional: Extra SQL run after schema/migration/seed
 	}
 
 	// 3. Initialize miniauth (this connects to the DB, runs migrations, and mounts auth routes)
@@ -419,7 +444,7 @@ cfg := miniauth.Config{
 
 - This project is a lightweight authentication starter and is not a full production-ready identity platform.
 - OTP values are currently returned directly in the response for development convenience.
-- The application expects `users`, `patients`, and `logs` tables in the configured database. Default schemas are applied automatically on init unless overridden via `SchemaPath` or `SchemaSQL`.
+- The application expects `users`, `patients`, and `logs` tables in the configured database. Default schemas are applied automatically on init unless overridden via `SchemaPath` or `SchemaSQL`; app-specific tables can be layered on top via `PostInitSQL` (see **Attaching custom SQL** above).
 - A default admin account (`admin@watchdog.local` / `admin123`) is seeded automatically the first time `Init` runs against an empty `users` table — see **Default admin account** above.
 - CORS is currently enabled for all origins (`AllowOrigins: ["*"]`); tighten this before deploying anywhere reachable from the public internet.
 
