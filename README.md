@@ -158,6 +158,20 @@ cfg := miniauth.Config{
 
 Like `SchemaSQL`/`SchemaPath`, `PostInitSQL` is split on `;` and executed one statement at a time, so multiple `CREATE TABLE`/`INSERT`/etc. statements in one string work without needing a driver-specific multi-statement DSN flag.
 
+### Writing your own queries against your own tables
+
+Mini Auth does not ship a query builder, repository layer, or generic "run arbitrary SQL" utility for your app's own tables — it only executes the fixed queries its own handlers need (`users`, `logs`, and `patients` if you use those routes). If your app has additional tables beyond what `PostInitSQL` creates, you write and run those queries yourself, using the exact same connection Mini Auth opened:
+
+```go
+import "github.com/MensahPrince/miniauth/db"
+
+rows, err := db.DB.Query("SELECT * FROM links WHERE created_by = ?", email)
+```
+
+`db.DB` is an exported `*sql.DB` (plain `database/sql`, no ORM), so there's no second connection pool to manage — after `miniauth.Init(cfg, app)` runs, `db.DB` is ready for both Mini Auth's handlers and your own code to use.
+
+This split is deliberate and also a security boundary: every table name Mini Auth's handlers touch is a literal string in its Go source, never derived from a request body, query param, or header, and every value passed to those queries is bound via `?` placeholders rather than concatenated into the SQL text. That means a client calling the HTTP API can never make Mini Auth write to a table of its choosing — the only way SQL text is attacker-shaped at all is if *you* build `SchemaSQL`/`SchemaPath`/`PostInitSQL` dynamically from untrusted input at startup, which you shouldn't do. Keep the same discipline (fixed table names, parameterized values) in whatever query utility you write for your own tables.
+
 ## Tutorials
 
 Two full walkthroughs, from an empty directory to a running server with a working database connection.
